@@ -11,7 +11,7 @@ from utils import (
     ensure_directories_exist, read_file,
     ORDERS_PATTERN, RETURNS_PATTERN, SETTLEMENT_PATTERN,
     ORDERS_MASTER, RETURNS_MASTER, SETTLEMENT_MASTER,
-    validate_file_columns
+    validate_file_columns, COLUMN_RENAMES
 )
 
 logger = logging.getLogger(__name__)
@@ -68,17 +68,7 @@ def process_orders_file(file_path: Path) -> None:
     orders_df['ingestion_timestamp'] = pd.Timestamp.now()
     
     # Standardize column names
-    orders_df = orders_df.rename(columns={
-        'order release id': 'order_release_id',
-        'order line id': 'order_line_id',
-        'order status': 'order_status',
-        'final amount': 'final_amount',
-        'total mrp': 'total_mrp',
-        'coupon discount': 'coupon_discount',
-        'shipping charge': 'shipping_charge',
-        'gift charge': 'gift_charge',
-        'tax recovery': 'tax_recovery'
-    })
+    orders_df = orders_df.rename(columns=COLUMN_RENAMES['orders'])
     
     # Convert numeric columns
     numeric_columns = [
@@ -90,10 +80,14 @@ def process_orders_file(file_path: Path) -> None:
             orders_df[col] = pd.to_numeric(orders_df[col], errors='coerce')
     
     # Convert date columns
-    if 'order_date' in orders_df.columns:
-        orders_df['order_date'] = pd.to_datetime(orders_df['order_date'])
-    if 'return_creation_date' in orders_df.columns:
-        orders_df['return_creation_date'] = pd.to_datetime(orders_df['return_creation_date'])
+    date_columns = [
+        'created_on', 'packed_on', 'fmpu_date', 'inscanned_on',
+        'shipped_on', 'delivered_on', 'cancelled_on',
+        'rto_creation_date', 'lost_date', 'return_creation_date'
+    ]
+    for col in date_columns:
+        if col in orders_df.columns:
+            orders_df[col] = pd.to_datetime(orders_df[col], errors='coerce')
     
     # Update master file with source file tracking
     if ORDERS_MASTER.exists():
@@ -129,9 +123,62 @@ def process_returns_file(file_path: Path) -> None:
     returns_df['source_file'] = file_path.name
     returns_df['ingestion_timestamp'] = pd.Timestamp.now()
     
+    # Standardize column names
+    returns_df = returns_df.rename(columns=COLUMN_RENAMES['returns'])
+    
     # Convert numeric columns
-    if 'total_actual_settlement' in returns_df.columns:
-        returns_df['total_actual_settlement'] = pd.to_numeric(returns_df['total_actual_settlement'], errors='coerce')
+    numeric_columns = [
+        'customer_paid_amount', 'postpaid_amount', 'prepaid_amount',
+        'mrp', 'total_discount_amount', 'total_tax_rate',
+        'igst_amount', 'cgst_amount', 'sgst_amount',
+        'tcs_amount', 'tds_amount', 'commission_percentage',
+        'minimum_commission', 'platform_fees', 'total_commission',
+        'total_commission_plus_tcs_tds_deduction', 'total_logistics_deduction',
+        'shipping_fee', 'fixed_fee', 'pick_and_pack_fee',
+        'payment_gateway_fee', 'total_tax_on_logistics',
+        'customer_paid_amt', 'total_settlement', 'total_actual_settlement',
+        'amount_pending_settlement', 'prepaid_commission_deduction',
+        'prepaid_logistics_deduction', 'prepaid_payment',
+        'postpaid_commission_deduction', 'postpaid_logistics_deduction',
+        'postpaid_payment', 'postpaid_amount_other', 'prepaid_amount_other',
+        'shipping_amount', 'gift_amount', 'additional_amount',
+        'cess_amount', 'taxable_amount', 'igst_rate', 'cgst_rate',
+        'sgst_rate', 'cess_rate', 'tcs_igst_rate', 'tcs_sgst_rate',
+        'tcs_cgst_rate', 'tds_rate', 'prepaid_commission_percentage',
+        'prepaid_minimum_commission', 'prepaid_platform_fees',
+        'prepaid_total_commission', 'prepaid_ship_commission_charge',
+        'prepaid_gift_commission_charge', 'prepaid_cod_commission_charge',
+        'prepaid_cart_discount', 'prepaid_coupon_discount',
+        'postpaid_commission_percentage', 'postpaid_minimum_commission',
+        'postpaid_platform_fees', 'postpaid_total_commission',
+        'postpaid_ship_commission_charge', 'postpaid_gift_commission_charge',
+        'postpaid_cod_commission_charge', 'postpaid_cart_discount',
+        'postpaid_coupon_discount', 'tcs_amount_prepaid',
+        'tcs_amount_postpaid', 'tds_amount_prepaid', 'tds_amount_postpaid',
+        'royaltyCharges_prepaid', 'royaltyCharges_postpaid',
+        'royaltyPercent_prepaid', 'royaltyPercent_postpaid',
+        'marketingCharges_prepaid', 'marketingCharges_postpaid',
+        'marketingPercent_prepaid', 'marketingPercent_postpaid',
+        'marketingContribution_prepaid', 'marketingContribution_postpaid',
+        'reverseAdditionalCharges_prepaid', 'reverseAdditionalCharges_postpaid'
+    ]
+    for col in numeric_columns:
+        if col in returns_df.columns:
+            returns_df[col] = pd.to_numeric(returns_df[col], errors='coerce')
+    
+    # Convert date columns
+    date_columns = [
+        'return_date', 'packing_date', 'delivery_date',
+        'settlement_date_prepaid_comm_deduction',
+        'settlement_date_prepaid_logistics_deduction',
+        'settlement_date_prepaid_payment',
+        'settlement_date_postpaid_comm_deduction',
+        'settlement_date_postpaid_logistics_deduction',
+        'settlement_date_postpaid_payment'
+    ]
+    for col in date_columns:
+        if col in returns_df.columns:
+            returns_df[col] = pd.to_datetime(returns_df[col], errors='coerce')
     
     # Update master file with source file tracking
     if RETURNS_MASTER.exists():
@@ -167,13 +214,63 @@ def process_settlement_file(file_path: Path) -> None:
     settlement_df['source_file'] = file_path.name
     settlement_df['ingestion_timestamp'] = pd.Timestamp.now()
     
+    # Standardize column names
+    settlement_df = settlement_df.rename(columns=COLUMN_RENAMES['settlement'])
+    
     # Convert numeric columns
-    if 'total_actual_settlement' in settlement_df.columns:
-        settlement_df['total_actual_settlement'] = pd.to_numeric(settlement_df['total_actual_settlement'], errors='coerce')
+    numeric_columns = [
+        'customer_paid_amount', 'postpaid_amount', 'prepaid_amount',
+        'mrp', 'total_discount_amount', 'total_tax_rate',
+        'igst_amount', 'cgst_amount', 'sgst_amount',
+        'tcs_amount', 'tds_amount', 'commission_percentage',
+        'minimum_commission', 'platform_fees', 'total_commission',
+        'total_commission_plus_tcs_tds_deduction', 'total_logistics_deduction',
+        'shipping_fee', 'fixed_fee', 'pick_and_pack_fee',
+        'payment_gateway_fee', 'total_tax_on_logistics',
+        'customer_paid_amt', 'total_expected_settlement',
+        'total_actual_settlement', 'amount_pending_settlement',
+        'prepaid_commission_deduction', 'prepaid_logistics_deduction',
+        'prepaid_payment', 'postpaid_commission_deduction',
+        'postpaid_logistics_deduction', 'postpaid_payment',
+        'postpaid_amount_other', 'prepaid_amount_other',
+        'shipping_amount', 'gift_amount', 'additional_amount',
+        'cess_amount', 'taxable_amount', 'igst_rate', 'cgst_rate',
+        'sgst_rate', 'cess_rate', 'tcs_igst_rate', 'tcs_sgst_rate',
+        'tcs_cgst_rate', 'tds_rate', 'prepaid_commission_percentage',
+        'prepaid_minimum_commission', 'prepaid_platform_fees',
+        'prepaid_total_commission', 'prepaid_ship_commission_charge',
+        'prepaid_gift_commission_charge', 'prepaid_cod_commission_charge',
+        'prepaid_cart_discount', 'prepaid_coupon_discount',
+        'postpaid_commission_percentage', 'postpaid_minimum_commission',
+        'postpaid_platform_fees', 'postpaid_total_commission',
+        'postpaid_ship_commission_charge', 'postpaid_gift_commission_charge',
+        'postpaid_cod_commission_charge', 'postpaid_cart_discount',
+        'postpaid_coupon_discount', 'tcs_amount_prepaid',
+        'tcs_amount_postpaid', 'tds_amount_prepaid', 'tds_amount_postpaid',
+        'royaltyCharges_prepaid', 'royaltyCharges_postpaid',
+        'royaltyPercent_prepaid', 'royaltyPercent_postpaid',
+        'marketingCharges_prepaid', 'marketingCharges_postpaid',
+        'marketingPercent_prepaid', 'marketingPercent_postpaid',
+        'marketingContribution_prepaid', 'marketingContribution_postpaid',
+        'forwardAdditionalCharges_prepaid', 'forwardAdditionalCharges_postpaid'
+    ]
+    for col in numeric_columns:
+        if col in settlement_df.columns:
+            settlement_df[col] = pd.to_numeric(settlement_df[col], errors='coerce')
     
     # Convert date columns
-    if 'settlement_date' in settlement_df.columns:
-        settlement_df['settlement_date'] = pd.to_datetime(settlement_df['settlement_date'])
+    date_columns = [
+        'return_date', 'packing_date', 'delivery_date',
+        'settlement_date_prepaid_comm_deduction',
+        'settlement_date_prepaid_logistics_deduction',
+        'settlement_date_prepaid_payment',
+        'settlement_date_postpaid_comm_deduction',
+        'settlement_date_postpaid_logistics_deduction',
+        'settlement_date_postpaid_payment'
+    ]
+    for col in date_columns:
+        if col in settlement_df.columns:
+            settlement_df[col] = pd.to_datetime(settlement_df[col], errors='coerce')
     
     # Update master file with source file tracking
     if SETTLEMENT_MASTER.exists():

@@ -1,141 +1,132 @@
-# Order Reconciliation Application
+# Reconciliation Application
 
-A Streamlit-based web application for processing and analyzing order, return, and settlement data. The application provides an interactive interface for file uploads, data analysis, and visualization of key metrics.
+This application helps track and reconcile orders, returns, and settlements for an e-commerce business. It processes CSV files containing order, return, and settlement data, stores the information in a database, and provides an API to query and analyze the data.
 
 ## Features
 
-- **File Upload and Processing**
-  - Upload orders, returns, and settlement files
-  - Support for CSV and Excel file formats
-  - Automatic validation of file contents
-  - Standardized file naming convention
+- Process orders, returns, and settlement data from CSV files
+- Track monthly reconciliation metrics
+- Calculate return losses and net profit
+- Monitor pending settlements
+- Provide REST API endpoints for data access
 
-- **Interactive Dashboard**
-  - Key metrics display (Total Orders, Net Profit/Loss, Settlement Rate, Return Rate)
-  - Interactive charts and visualizations
-  - Real-time status updates
-  - Order status distribution
-  - Profit/Loss distribution
+## Setup
 
-- **Detailed Analysis**
-  - Comprehensive order analysis
-  - Status tracking and changes
-  - Financial calculations
-  - Settlement tracking
-
-- **Master Data Management**
-  - Consolidated view of orders, returns, and settlements
-  - Deduplication of records
-  - Historical data tracking
-
-- **Anomaly Detection**
-  - Identification of data inconsistencies
-  - Negative profit/loss tracking
-  - Missing settlement data
-  - Return/Settlement conflicts
-
-## Installation
-
-1. Clone the repository:
-```bash
-git clone <repository-url>
-cd reconciliation
-```
-
-2. Create a virtual environment (recommended):
+1. Create a virtual environment and activate it:
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-3. Install dependencies:
+2. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
+3. Create a `.env` file in the project root with the following content:
+```
+DATABASE_URL=sqlite:///./reconciliation.db
+```
+
+4. Place your CSV files in the `data` directory with the following naming convention:
+- `orders-MM-YYYY.csv`
+- `returns-MM-YYYY.csv`
+- `settlement-MM-YYYY.csv`
+
 ## Usage
 
-1. Start the Streamlit application:
+1. Process data files and populate the database:
 ```bash
-streamlit run src/app.py
+python scripts/process_data.py
 ```
 
-2. Open your web browser and navigate to the URL shown in the terminal (typically http://localhost:8501)
-
-3. Use the application:
-   - Upload files using the File Upload tab
-   - View metrics and charts in the Dashboard tab
-   - Analyze detailed data in the Detailed Analysis tab
-   - Check master data in the Master Data tab
-   - Review anomalies in the Anomalies tab
-
-## File Structure
-
-```
-reconciliation/
-├── data/               # Input data files
-├── output/            # Generated output files
-│   ├── master/       # Consolidated master files
-│   ├── analysis/     # Analysis results
-│   ├── reports/      # Generated reports
-│   └── visualizations/ # Interactive charts
-├── src/              # Source code
-│   ├── app.py        # Streamlit application
-│   ├── ingestion.py  # Data ingestion module
-│   ├── analysis.py   # Analysis module
-│   ├── reporting.py  # Reporting module
-│   └── utils.py      # Utility functions
-└── requirements.txt  # Python dependencies
+2. Start the API server:
+```bash
+python scripts/run_api.py
 ```
 
-## File Naming Convention
+3. Access the API documentation at:
+```
+http://localhost:8000/docs
+```
 
-Input files should follow the naming convention:
-- Orders: `orders-MM-YYYY.csv` or `orders-MM-YYYY.xlsx`
-- Returns: `returns-MM-YYYY.csv` or `returns-MM-YYYY.xlsx`
-- Settlement: `settlement-MM-YYYY.csv` or `settlement-MM-YYYY.xlsx`
+## API Endpoints
 
-Where:
-- MM: Month (01-12)
-- YYYY: Year (e.g., 2024)
+### Orders
+- `GET /orders/` - Get all orders with optional filters
+  - Query parameters:
+    - `start_date`: Filter orders from this date
+    - `end_date`: Filter orders until this date
+    - `payment_type`: Filter by payment type (prepaid/postpaid)
 
-## Data Requirements
+### Returns
+- `GET /returns/` - Get all returns with optional filters
+  - Query parameters:
+    - `start_date`: Filter returns from this date
+    - `end_date`: Filter returns until this date
+    - `return_type`: Filter by return type (return_refund/exchange)
 
-### Orders File
-Required columns:
-- `order_release_id`
-- `order_status`
-- `final_amount`
-- `total_mrp`
+### Settlements
+- `GET /settlements/` - Get all settlements with optional filters
+  - Query parameters:
+    - `start_date`: Filter settlements from this date
+    - `end_date`: Filter settlements until this date
+    - `status`: Filter by settlement status (completed/partial/pending)
 
-### Returns File
-Required columns:
-- `order_release_id`
-- `return_amount`
+### Monthly Reconciliation
+- `GET /monthly-reconciliation/` - Get monthly reconciliation data
+  - Query parameters:
+    - `start_month`: Filter from this month
+    - `end_month`: Filter until this month
 
-### Settlement File
-Required columns:
-- `order_release_id`
-- `settlement_amount`
+### Reconciliation Summary
+- `GET /reconciliation-summary/` - Get detailed reconciliation summary for a specific month
+  - Query parameters:
+    - `month`: The month to get summary for (defaults to current month)
 
-## Analysis Features
+## Data Structure
 
-### Order Status Tracking
-- Cancelled
-- Returned
-- Completed - Settled
-- Completed - Pending Settlement
+### Orders
+- Tracks order details including:
+  - Order ID and line items
+  - Creation and delivery dates
+  - Amounts (final, MRP, discount, shipping)
+  - Payment type
+  - Location information
 
-### Financial Calculations
-- Profit/Loss per order
-- Return settlement amounts
-- Order settlement amounts
-- Net profit/loss
+### Returns
+- Tracks return details including:
+  - Return type (refund/exchange)
+  - Dates (return, packing, delivery)
+  - Amounts (customer paid, settlement)
+  - Payment split (prepaid/postpaid)
 
-### Anomaly Detection
-- Negative profit/loss orders
-- Missing settlement data
-- Return/Settlement conflicts
+### Settlements
+- Tracks settlement details including:
+  - Expected and actual settlement amounts
+  - Pending amounts
+  - Commission and logistics deductions
+  - Payment splits
+  - Settlement status
+
+### Monthly Reconciliation
+- Aggregates monthly metrics including:
+  - Total orders and returns
+  - Settlement totals
+  - Return losses
+  - Net profit
+
+## Error Handling
+
+The application includes comprehensive error handling:
+- Input validation
+- Database transaction management
+- Logging of errors and operations
+- Graceful error responses in the API
+
+## Logging
+
+Logs are written to `reconciliation.log` in the project root directory. The log level is set to INFO by default.
 
 ## Contributing
 

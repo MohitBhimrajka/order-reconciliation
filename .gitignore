@@ -35,6 +35,8 @@ venv.bak/
 *.swp
 *.swo
 .DS_Store
+*.sublime-workspace
+*.sublime-project
 
 # Project specific
 data/*
@@ -42,11 +44,24 @@ data/*
 output/*
 !output/.gitkeep
 temp_*
+master_data/*
+!master_data/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+reconciliation.db
+*.csv
+*.xlsx
+*.xls
+!data/templates/*.csv
+!data/templates/*.xlsx
 
 # Logs
 *.log
 logs/
 log/
+reconciliation.log
+streamlit.log
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -56,6 +71,10 @@ log/
 .env.development.local
 .env.test.local
 .env.production.local
+
+# Streamlit
+.streamlit/
+.streamlit/secrets.toml
 
 # Distribution / packaging
 .Python
@@ -84,4 +103,24 @@ htmlcov/
 nosetests.xml
 coverage.xml
 *.cover
-.hypothesis/ 
+.hypothesis/
+
+# Database migrations
+migrations/versions/*
+!migrations/versions/.gitkeep
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db 
