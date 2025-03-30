@@ -1,140 +1,212 @@
-# Reconciliation Application
+# Reconciliation System
 
-This application helps track and reconcile orders, returns, and settlements for an e-commerce business. It processes CSV files containing order, return, and settlement data, stores the information in a database, and provides an API to query and analyze the data.
+A comprehensive system for managing and reconciling orders, returns, and settlements.
 
-## Features
+## Architecture
 
-- Process orders, returns, and settlement data from CSV files
-- Track monthly reconciliation metrics
-- Calculate return losses and net profit
-- Monitor pending settlements
-- Provide REST API endpoints for data access
+The system follows a modern, DB-centric architecture with the following components:
 
-## Setup
+### Backend (Python/FastAPI)
+- **API Layer**: FastAPI-based REST API
+- **Database Layer**: PostgreSQL with SQLAlchemy ORM
+- **Processing Layer**: Efficient data processing with SQL queries
+- **Reporting Layer**: Real-time reporting and analytics
 
-1. Create a virtual environment and activate it:
+### Frontend (React)
+- **UI Layer**: Modern React components
+- **State Management**: Redux for global state
+- **API Integration**: Axios for API communication
+- **Visualization**: Plotly for interactive charts
+
+### Database Schema
+- **Orders**: Core order information
+- **Returns**: Return processing and tracking
+- **Settlements**: Settlement management and reconciliation
+- **Status History**: Order status tracking
+- **Audit Logs**: System activity logging
+
+## Prerequisites
+
+- Python 3.8 or higher
+- Node.js 14 or higher
+- PostgreSQL 12 or higher
+- Git
+
+## Installation
+
+1. Clone the repository:
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+git clone <repository-url>
+cd reconciliation
+```
+
+2. Run the setup script:
+```bash
+./run.sh
+```
+
+The script will:
+- Check prerequisites
+- Create and activate virtual environment
+- Install Python dependencies
+- Install Node.js dependencies
+- Set up environment variables
+- Initialize database
+- Start backend and frontend servers
+
+## Data Requirements
+
+### Order Data
+- Order ID (unique identifier)
+- Customer information
+- Order details (items, quantities, prices)
+- Status information
+- Timestamps
+
+### Return Data
+- Return ID (unique identifier)
+- Associated Order ID
+- Return reason
+- Return status
+- Settlement information
+
+### Settlement Data
+- Settlement ID (unique identifier)
+- Associated Order/Return ID
+- Settlement amount
+- Settlement status
+- Payment information
+
+## Usage
+
+1. **Starting the System**
+```bash
+./run.sh
+```
+
+2. **Accessing the Application**
+- Frontend: http://localhost:3000
+- Backend API: http://localhost:8000
+- API Documentation: http://localhost:8000/docs
+
+3. **Data Processing**
+- Upload data files through the web interface
+- Monitor processing status in real-time
+- View processing results and reports
+
+4. **Reporting**
+- Generate custom reports
+- View analytics and visualizations
+- Export data in various formats
+
+## Testing
+
+### Running Tests
+```bash
+# Activate virtual environment
+source venv/bin/activate
+
+# Run Python tests
+pytest
+
+# Run frontend tests
+cd frontend
+npm test
+```
+
+### Test Coverage
+- Backend: 90%+ coverage
+- Frontend: 80%+ coverage
+- Critical paths: 100% coverage
+
+## Development
+
+### Backend Development
+1. Activate virtual environment:
+```bash
+source venv/bin/activate
+```
+
+2. Install development dependencies:
+```bash
+pip install -r requirements-dev.txt
+```
+
+3. Run development server:
+```bash
+uvicorn src.api:app --reload
+```
+
+### Frontend Development
+1. Navigate to frontend directory:
+```bash
+cd frontend
 ```
 
 2. Install dependencies:
 ```bash
-pip install -r requirements.txt
+npm install
 ```
 
-3. Create a `.env` file in the project root with the following content:
-```
-DATABASE_URL=sqlite:///./reconciliation.db
-```
-
-4. Place your CSV files in the `data` directory with the following naming convention:
-- `orders-MM-YYYY.csv`
-- `returns-MM-YYYY.csv`
-- `settlement-MM-YYYY.csv`
-
-## Usage
-
-1. Process data files and populate the database:
+3. Run development server:
 ```bash
-python scripts/process_data.py
+npm start
 ```
 
-2. Start the API server:
+## Deployment
+
+### Production Setup
+1. Set up environment variables:
 ```bash
-python scripts/run_api.py
+cp .env.example .env
+# Edit .env with production values
 ```
 
-3. Access the API documentation at:
+2. Build frontend:
+```bash
+cd frontend
+npm run build
 ```
-http://localhost:8000/docs
+
+3. Start production servers:
+```bash
+# Backend
+gunicorn src.api:app -w 4 -k uvicorn.workers.UvicornWorker
+
+# Frontend (using nginx)
+sudo systemctl start nginx
 ```
 
-## API Endpoints
+## Troubleshooting
 
-### Orders
-- `GET /orders/` - Get all orders with optional filters
-  - Query parameters:
-    - `start_date`: Filter orders from this date
-    - `end_date`: Filter orders until this date
-    - `payment_type`: Filter by payment type (prepaid/postpaid)
+### Common Issues
+1. **Database Connection**
+   - Check PostgreSQL service status
+   - Verify database credentials in .env
+   - Ensure database exists
 
-### Returns
-- `GET /returns/` - Get all returns with optional filters
-  - Query parameters:
-    - `start_date`: Filter returns from this date
-    - `end_date`: Filter returns until this date
-    - `return_type`: Filter by return type (return_refund/exchange)
+2. **API Errors**
+   - Check API logs
+   - Verify environment variables
+   - Check network connectivity
 
-### Settlements
-- `GET /settlements/` - Get all settlements with optional filters
-  - Query parameters:
-    - `start_date`: Filter settlements from this date
-    - `end_date`: Filter settlements until this date
-    - `status`: Filter by settlement status (completed/partial/pending)
+3. **Frontend Issues**
+   - Clear browser cache
+   - Check console for errors
+   - Verify API endpoints
 
-### Monthly Reconciliation
-- `GET /monthly-reconciliation/` - Get monthly reconciliation data
-  - Query parameters:
-    - `start_month`: Filter from this month
-    - `end_month`: Filter until this month
-
-### Reconciliation Summary
-- `GET /reconciliation-summary/` - Get detailed reconciliation summary for a specific month
-  - Query parameters:
-    - `month`: The month to get summary for (defaults to current month)
-
-## Data Structure
-
-### Orders
-- Tracks order details including:
-  - Order ID and line items
-  - Creation and delivery dates
-  - Amounts (final, MRP, discount, shipping)
-  - Payment type
-  - Location information
-
-### Returns
-- Tracks return details including:
-  - Return type (refund/exchange)
-  - Dates (return, packing, delivery)
-  - Amounts (customer paid, settlement)
-  - Payment split (prepaid/postpaid)
-
-### Settlements
-- Tracks settlement details including:
-  - Expected and actual settlement amounts
-  - Pending amounts
-  - Commission and logistics deductions
-  - Payment splits
-  - Settlement status
-
-### Monthly Reconciliation
-- Aggregates monthly metrics including:
-  - Total orders and returns
-  - Settlement totals
-  - Return losses
-  - Net profit
-
-## Error Handling
-
-The application includes comprehensive error handling:
-- Input validation
-- Database transaction management
-- Logging of errors and operations
-- Graceful error responses in the API
-
-## Logging
-
-Logs are written to `reconciliation.log` in the project root directory. The log level is set to INFO by default.
+### Logs
+- Backend logs: `logs/backend.log`
+- Frontend logs: `logs/frontend.log`
+- Database logs: Check PostgreSQL logs
 
 ## Contributing
 
 1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
+2. Create feature branch
+3. Commit changes
+4. Push to branch
+5. Create Pull Request
 
 ## License
 

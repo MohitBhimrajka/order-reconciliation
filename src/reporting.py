@@ -4,7 +4,6 @@ Reporting and visualization module for reconciliation application.
 import os
 import logging
 from typing import Dict, List, Optional, Any
-import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.dates import DateFormatter
 import seaborn as sns
@@ -12,86 +11,136 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
-from sqlalchemy import text, func
+from sqlalchemy import text, func, and_, or_
 from sqlalchemy.orm import Session
 from src.cache import cache
 from src.optimization import QueryOptimizer
 
 from utils import (
-    ensure_directories_exist, read_file, ANALYSIS_OUTPUT, REPORT_OUTPUT,
-    VISUALIZATION_DIR, ANOMALIES_OUTPUT, REPORT_DIR
+    ensure_directories_exist, REPORT_OUTPUT,
+    VISUALIZATION_DIR, REPORT_DIR
 )
 
 logger = logging.getLogger(__name__)
 
-def save_analysis_results(analysis_df: pd.DataFrame) -> None:
+def generate_report(db: Session, month: Optional[datetime] = None) -> str:
     """
-    Save analysis results to CSV file.
+    Generate a text report from database analysis.
     
     Args:
-        analysis_df: Analysis results DataFrame
-    """
-    ensure_directories_exist()
-    analysis_df.to_csv(ANALYSIS_OUTPUT, index=False)
-
-def generate_report(summary: Dict) -> str:
-    """
-    Generate a text report from analysis summary.
-    
-    Args:
-        summary: Analysis summary dictionary
+        db: Database session
+        month: Optional month to analyze
     
     Returns:
         Formatted report string
     """
-    # Calculate percentages
-    total_orders = summary['total_orders']
-    cancelled_pct = (summary['status_counts'].get('Cancelled', 0) / total_orders * 100) if total_orders > 0 else 0
-    returned_pct = (summary['status_counts'].get('Returned', 0) / total_orders * 100) if total_orders > 0 else 0
-    settled_pct = (summary['status_counts'].get('Completed - Settled', 0) / total_orders * 100) if total_orders > 0 else 0
-    pending_pct = (summary['status_counts'].get('Completed - Pending Settlement', 0) / total_orders * 100) if total_orders > 0 else 0
-    
-    # Calculate average values
-    avg_profit = (summary['total_order_settlement'] / summary['status_counts'].get('Completed - Settled', 1)) if summary['status_counts'].get('Completed - Settled', 0) > 0 else 0
-    avg_loss = (summary['total_return_settlement'] / summary['status_counts'].get('Returned', 1)) if summary['status_counts'].get('Returned', 0) > 0 else 0
-    
-    report = [
-        "=== Order Reconciliation Report ===",
-        "",
-        "=== Order Counts ===",
-        f"Total Orders: {total_orders}",
-        f"Cancelled Orders: {summary['status_counts'].get('Cancelled', 0)} ({cancelled_pct:.2f}%)",
-        f"Returned Orders: {summary['status_counts'].get('Returned', 0)} ({returned_pct:.2f}%)",
-        f"Completed and Settled Orders: {summary['status_counts'].get('Completed - Settled', 0)} ({settled_pct:.2f}%)",
-        f"Completed but Pending Settlement Orders: {summary['status_counts'].get('Completed - Pending Settlement', 0)} ({pending_pct:.2f}%)",
-        "",
-        "=== Financial Analysis ===",
-        f"Total Profit from Settled Orders: {summary['total_order_settlement']:.2f}",
-        f"Total Loss from Returned Orders: {abs(summary['total_return_settlement']):.2f}",
-        f"Net Profit/Loss: {summary['net_profit_loss']:.2f}",
-        "",
-        "=== Settlement Information ===",
-        f"Total Return Settlement Amount: ₹{abs(summary['total_return_settlement']):,.2f}",
-        f"Total Order Settlement Amount: ₹{summary['total_order_settlement']:,.2f}",
-        f"Potential Settlement Value (Pending): ₹{summary.get('pending_settlement_value', 0):,.2f}",
-        f"Status Changes in This Run: {summary['status_changes']}",
-        f"Orders Newly Settled in This Run: {summary['settlement_changes']}",
-        f"Orders Newly Pending in This Run: {summary['pending_changes']}",
-        "",
-        "=== Key Metrics ===",
-        f"Settlement Rate: {summary['settlement_rate']:.2f}%",
-        f"Return Rate: {summary['return_rate']:.2f}%",
-        f"Average Profit per Settled Order: {avg_profit:.2f}",
-        f"Average Loss per Returned Order: {abs(avg_loss):.2f}",
-        "",
-        "=== Recommendations ===",
-        "1. Monitor orders with status 'Completed - Pending Settlement' to ensure they get settled.",
-        "2. Analyze orders with high losses to identify patterns and potential issues.",
-        "3. Investigate return patterns to reduce return rates.",
-        "4. Consider strategies to increase settlement rates for shipped orders."
-    ]
-    
-    return "\n".join(report)
+    try:
+        # Get order counts and status distribution
+        status_query = text("""
+            SELECT 
+                COUNT(*) as total_orders,
+                SUM(CASE WHEN order_status = 'Cancelled' THEN 1 ELSE 0 END) as cancelled_count,
+                SUM(CASE WHEN order_status = 'Returned' THEN 1 ELSE 0 END) as returned_count,
+                SUM(CASE WHEN order_status = 'Completed' AND s.status = 'settled' THEN 1 ELSE 0 END) as settled_count,
+                SUM(CASE WHEN order_status = 'Completed' AND s.status = 'pending' THEN 1 ELSE 0 END) as pending_count
+            FROM orders o
+            LEFT JOIN settlements s ON o.order_release_id = s.order_release_id
+            WHERE (:month IS NULL OR DATE_TRUNC('month', o.created_on) = :month)
+        """)
+        
+        status_result = db.execute(status_query, {'month': month}).first()
+        total_orders = status_result.total_orders
+        cancelled_count = status_result.cancelled_count
+        returned_count = status_result.returned_count
+        settled_count = status_result.settled_count
+        pending_count = status_result.pending_count
+        
+        # Calculate percentages
+        cancelled_pct = (cancelled_count / total_orders * 100) if total_orders > 0 else 0
+        returned_pct = (returned_count / total_orders * 100) if total_orders > 0 else 0
+        settled_pct = (settled_count / total_orders * 100) if total_orders > 0 else 0
+        pending_pct = (pending_count / total_orders * 100) if total_orders > 0 else 0
+        
+        # Get financial metrics
+        financial_query = text("""
+            SELECT 
+                SUM(CASE WHEN s.status = 'settled' THEN s.total_actual_settlement ELSE 0 END) as total_settled,
+                SUM(CASE WHEN s.status = 'pending' THEN s.total_expected_settlement ELSE 0 END) as pending_settlement,
+                SUM(CASE WHEN r.return_date IS NOT NULL THEN r.total_settlement ELSE 0 END) as total_return_settlement
+            FROM orders o
+            LEFT JOIN settlements s ON o.order_release_id = s.order_release_id
+            LEFT JOIN returns r ON o.order_release_id = r.order_release_id
+            WHERE (:month IS NULL OR DATE_TRUNC('month', o.created_on) = :month)
+        """)
+        
+        financial_result = db.execute(financial_query, {'month': month}).first()
+        total_settled = financial_result.total_settled or 0
+        pending_settlement = financial_result.pending_settlement or 0
+        total_return_settlement = financial_result.total_return_settlement or 0
+        
+        # Calculate net profit/loss
+        net_profit_loss = total_settled + total_return_settlement
+        
+        # Get settlement metrics
+        settlement_query = text("""
+            SELECT 
+                COUNT(*) as total_settlements,
+                SUM(CASE WHEN status = 'settled' THEN 1 ELSE 0 END) as completed_settlements,
+                AVG(CASE WHEN status = 'settled' 
+                    THEN EXTRACT(EPOCH FROM (s.created_at - o.created_on))/86400 
+                    ELSE NULL END) as avg_settlement_days
+            FROM settlements s
+            JOIN orders o ON s.order_release_id = o.order_release_id
+            WHERE (:month IS NULL OR DATE_TRUNC('month', o.created_on) = :month)
+        """)
+        
+        settlement_result = db.execute(settlement_query, {'month': month}).first()
+        total_settlements = settlement_result.total_settlements
+        completed_settlements = settlement_result.completed_settlements
+        avg_settlement_days = settlement_result.avg_settlement_days or 0
+        
+        # Calculate rates
+        settlement_rate = (completed_settlements / total_settlements * 100) if total_settlements > 0 else 0
+        return_rate = (returned_count / total_orders * 100) if total_orders > 0 else 0
+        
+        # Generate report
+        report = [
+            "=== Order Reconciliation Report ===",
+            "",
+            "=== Order Counts ===",
+            f"Total Orders: {total_orders}",
+            f"Cancelled Orders: {cancelled_count} ({cancelled_pct:.2f}%)",
+            f"Returned Orders: {returned_count} ({returned_pct:.2f}%)",
+            f"Completed and Settled Orders: {settled_count} ({settled_pct:.2f}%)",
+            f"Completed but Pending Settlement Orders: {pending_count} ({pending_pct:.2f}%)",
+            "",
+            "=== Financial Analysis ===",
+            f"Total Profit from Settled Orders: ₹{total_settled:,.2f}",
+            f"Total Loss from Returned Orders: ₹{abs(total_return_settlement):,.2f}",
+            f"Net Profit/Loss: ₹{net_profit_loss:,.2f}",
+            "",
+            "=== Settlement Information ===",
+            f"Total Return Settlement Amount: ₹{abs(total_return_settlement):,.2f}",
+            f"Total Order Settlement Amount: ₹{total_settled:,.2f}",
+            f"Potential Settlement Value (Pending): ₹{pending_settlement:,.2f}",
+            "",
+            "=== Key Metrics ===",
+            f"Settlement Rate: {settlement_rate:.2f}%",
+            f"Return Rate: {return_rate:.2f}%",
+            f"Average Settlement Time: {avg_settlement_days:.1f} days",
+            "",
+            "=== Recommendations ===",
+            "1. Monitor orders with status 'Completed - Pending Settlement' to ensure they get settled.",
+            "2. Analyze orders with high losses to identify patterns and potential issues.",
+            "3. Investigate return patterns to reduce return rates.",
+            "4. Consider strategies to increase settlement rates for shipped orders."
+        ]
+        
+        return "\n".join(report)
+        
+    except Exception as e:
+        logger.error(f"Error generating report: {str(e)}")
+        raise
 
 def save_report(report: str) -> None:
     """
@@ -122,6 +171,108 @@ def save_report(report: str) -> None:
         if line.startswith('===') or line.startswith('Total Orders:'):
             logger.info(line)
 
+def generate_visualizations(db: Session, month: Optional[datetime] = None) -> Dict[str, go.Figure]:
+    """
+    Generate interactive visualizations using Plotly.
+    
+    Args:
+        db: Database session
+        month: Optional month to analyze
+    
+    Returns:
+        Dictionary mapping visualization names to Plotly figures
+    """
+    figures = {}
+    
+    try:
+        # Order Status Distribution
+        status_query = text("""
+            SELECT 
+                CASE 
+                    WHEN order_status = 'Cancelled' THEN 'Cancelled'
+                    WHEN order_status = 'Returned' THEN 'Returned'
+                    WHEN order_status = 'Completed' AND s.status = 'settled' THEN 'Completed - Settled'
+                    WHEN order_status = 'Completed' AND s.status = 'pending' THEN 'Completed - Pending'
+                    ELSE order_status
+                END as status,
+                COUNT(*) as count
+            FROM orders o
+            LEFT JOIN settlements s ON o.order_release_id = s.order_release_id
+            WHERE (:month IS NULL OR DATE_TRUNC('month', o.created_on) = :month)
+            GROUP BY status
+        """)
+        
+        status_results = db.execute(status_query, {'month': month}).fetchall()
+        status_data = [{'status': r.status, 'count': r.count} for r in status_results]
+        
+        fig = px.pie(
+            values=[d['count'] for d in status_data],
+            names=[d['status'] for d in status_data],
+            title="Order Status Distribution"
+        )
+        figures['status_distribution'] = fig
+        
+        # Monthly Trends
+        monthly_query = text("""
+            SELECT 
+                DATE_TRUNC('month', o.created_on) as month,
+                COUNT(*) as total_orders,
+                SUM(CASE WHEN s.status = 'settled' THEN s.total_actual_settlement ELSE 0 END) as total_settled,
+                SUM(CASE WHEN r.return_date IS NOT NULL THEN r.total_settlement ELSE 0 END) as total_return_settlement,
+                SUM(CASE WHEN s.status = 'settled' THEN 1 ELSE 0 END)::float / COUNT(*) * 100 as settlement_rate
+            FROM orders o
+            LEFT JOIN settlements s ON o.order_release_id = s.order_release_id
+            LEFT JOIN returns r ON o.order_release_id = r.order_release_id
+            GROUP BY DATE_TRUNC('month', o.created_on)
+            ORDER BY month
+        """)
+        
+        monthly_results = db.execute(monthly_query).fetchall()
+        monthly_data = [{
+            'month': r.month.strftime('%Y-%m'),
+            'total_orders': r.total_orders,
+            'total_settled': r.total_settled or 0,
+            'total_return_settlement': r.total_return_settlement or 0,
+            'settlement_rate': r.settlement_rate or 0
+        } for r in monthly_results]
+        
+        # Orders Trend
+        fig = px.line(
+            monthly_data,
+            x='month',
+            y='total_orders',
+            title="Monthly Orders Trend"
+        )
+        figures['monthly_orders_trend'] = fig
+        
+        # Profit/Loss Trend
+        fig = px.line(
+            monthly_data,
+            x='month',
+            y=['total_settled', 'total_return_settlement'],
+            title="Monthly Profit/Loss Trend"
+        )
+        fig.add_hline(y=0, line_dash="dash", line_color="red")
+        figures['monthly_profit_loss_trend'] = fig
+        
+        # Settlement Rate Trend
+        fig = px.line(
+            monthly_data,
+            x='month',
+            y='settlement_rate',
+            title="Monthly Settlement Rate Trend"
+        )
+        figures['monthly_settlement_rate_trend'] = fig
+        
+        # Save the figures to files
+        save_visualizations(figures)
+        
+        return figures
+        
+    except Exception as e:
+        logger.error(f"Error generating visualizations: {str(e)}")
+        raise
+
 def save_visualizations(figures: Dict[str, go.Figure]) -> None:
     """
     Save Plotly figures to HTML files in the visualizations directory.
@@ -135,390 +286,144 @@ def save_visualizations(figures: Dict[str, go.Figure]) -> None:
         fig.write_html(str(output_path))
         logger.info(f"Saved visualization to {output_path}")
 
-def generate_visualizations(analysis_df: pd.DataFrame, summary: Dict) -> Dict[str, go.Figure]:
-    """
-    Generate interactive visualizations using Plotly.
-    
-    Args:
-        analysis_df: Analysis results DataFrame
-        summary: Analysis summary dictionary
-    
-    Returns:
-        Dictionary mapping visualization names to Plotly figures
-    """
-    figures = {}
-    
-    # Order Status Distribution
-    status_counts = analysis_df['status'].value_counts()
-    fig = px.pie(
-        values=status_counts.values,
-        names=status_counts.index,
-        title="Order Status Distribution"
-    )
-    figures['status_distribution'] = fig
-    
-    # Profit/Loss Distribution
-    profit_loss_data = analysis_df[analysis_df['profit_loss'].notna()]
-    fig = px.histogram(
-        profit_loss_data,
-        x='profit_loss',
-        title="Profit/Loss Distribution",
-        nbins=50
-    )
-    fig.add_vline(x=0, line_dash="dash", line_color="red")
-    figures['profit_loss_distribution'] = fig
-    
-    # Monthly Trends
-    if 'source_file' in analysis_df.columns:
-        # Extract month and year from source file names
-        def extract_month_year(filename: str) -> str:
-            # Example filename: 'orders-02-2025.csv' -> '2025-02'
-            parts = filename.split('-')
-            if len(parts) >= 3:
-                month = parts[1]
-                year = parts[2].split('.')[0]
-                return f"{year}-{month}"
-            return "Unknown"
-        
-        analysis_df['month_year'] = analysis_df['source_file'].apply(extract_month_year)
-        
-        monthly_stats = analysis_df.groupby('month_year').agg({
-            'order_release_id': 'count',
-            'profit_loss': 'sum',
-            'status': lambda x: (x == 'Completed - Settled').mean() * 100
-        }).reset_index()
-        
-        monthly_stats.columns = ['Month', 'Total Orders', 'Net Profit/Loss', 'Settlement Rate']
-        
-        # Sort by month-year
-        monthly_stats['Month'] = pd.to_datetime(monthly_stats['Month'])
-        monthly_stats = monthly_stats.sort_values('Month')
-        monthly_stats['Month'] = monthly_stats['Month'].dt.strftime('%Y-%m')
-        
-        # Orders Trend
-        fig = px.line(
-            monthly_stats,
-            x='Month',
-            y='Total Orders',
-            title="Monthly Orders Trend"
-        )
-        figures['monthly_orders_trend'] = fig
-        
-        # Profit/Loss Trend
-        fig = px.line(
-            monthly_stats,
-            x='Month',
-            y='Net Profit/Loss',
-            title="Monthly Profit/Loss Trend"
-        )
-        fig.add_hline(y=0, line_dash="dash", line_color="red")
-        figures['monthly_profit_loss_trend'] = fig
-        
-        # Settlement Rate Trend
-        fig = px.line(
-            monthly_stats,
-            x='Month',
-            y='Settlement Rate',
-            title="Monthly Settlement Rate Trend"
-        )
-        figures['monthly_settlement_rate_trend'] = fig
-    
-    # Settlement Changes
-    if 'status_changed_this_run' in analysis_df.columns:
-        settlement_changes = analysis_df[
-            (analysis_df['status_changed_this_run']) &
-            (analysis_df['status'] == 'Completed - Settled')
-        ]
-        
-        if not settlement_changes.empty:
-            fig = px.bar(
-                settlement_changes,
-                x='settlement_update_run_timestamp',
-                y='profit_loss',
-                title="Settlement Changes in Last Run",
-                labels={
-                    'settlement_update_run_timestamp': 'Settlement Date',
-                    'profit_loss': 'Profit/Loss'
-                }
-            )
-            fig.add_hline(y=0, line_dash="dash", line_color="red")
-            figures['settlement_changes'] = fig
-    
-    # Save the figures to files
-    save_visualizations(figures)
-    
-    return figures
-
-def identify_anomalies(
-    analysis_df: pd.DataFrame,
-    orders_df: pd.DataFrame,
-    returns_df: pd.DataFrame,
-    settlement_df: pd.DataFrame
-) -> pd.DataFrame:
-    """
-    Identify anomalies in the data.
-    
-    Args:
-        analysis_df: Analysis results DataFrame
-        orders_df: Orders DataFrame
-        returns_df: Returns DataFrame
-        settlement_df: Settlement DataFrame
-    
-    Returns:
-        DataFrame containing identified anomalies
-    """
-    anomalies = []
-    
-    # Check for orders with negative profit/loss
-    negative_profit = analysis_df[analysis_df['profit_loss'] < 0]
-    if not negative_profit.empty:
-        anomalies.extend([
-            {
-                'type': 'Negative Profit',
-                'order_release_id': row['order_release_id'],
-                'details': f"Profit/Loss: ₹{row['profit_loss']:,.2f}"
-            }
-            for _, row in negative_profit.iterrows()
-        ])
-    
-    # Check for orders with missing settlement data
-    pending_settlement = analysis_df[
-        analysis_df['status'] == 'Completed - Pending Settlement'
-    ]
-    if not pending_settlement.empty:
-        anomalies.extend([
-            {
-                'type': 'Missing Settlement',
-                'order_release_id': row['order_release_id'],
-                'details': f"Order Amount: ₹{row['final_amount']:,.2f}"
-            }
-            for _, row in pending_settlement.iterrows()
-        ])
-    
-    # Check for orders with both return and settlement data
-    conflict_orders = analysis_df[
-        (analysis_df['return_settlement'] > 0) &
-        (analysis_df['order_settlement'] > 0)
-    ]
-    if not conflict_orders.empty:
-        anomalies.extend([
-            {
-                'type': 'Return/Settlement Conflict',
-                'order_release_id': row['order_release_id'],
-                'details': f"Return: ₹{row['return_settlement']:,.2f}, Settlement: ₹{row['order_settlement']:,.2f}"
-            }
-            for _, row in conflict_orders.iterrows()
-        ])
-    
-    # Create anomalies DataFrame
-    anomalies_df = pd.DataFrame(anomalies)
-    
-    # Save anomalies to file
-    if not anomalies_df.empty:
-        anomalies_df.to_csv(ANOMALIES_OUTPUT, index=False)
-    
-    return anomalies_df
-
 class RealTimeReporter:
+    """Real-time reporting and monitoring class."""
+    
     def __init__(self, session: Session):
         self.session = session
-        self.query_optimizer = QueryOptimizer(session)
-        self.cache = cache
-
+        self.query_optimizer = QueryOptimizer()
+    
+    @cache(ttl=300)  # Cache for 5 minutes
     def get_daily_summary(self, date: Optional[datetime] = None) -> Dict[str, Any]:
-        """Get daily summary of orders, returns, and settlements."""
-        date = date or datetime.now()
-        cache_key = f"daily_summary:{date.strftime('%Y-%m-%d')}"
-
-        def fetch_summary():
-            try:
-                # Get orders summary
-                orders_query = """
-                SELECT 
-                    COUNT(*) as total_orders,
-                    SUM(CASE WHEN order_status = 'D' THEN 1 ELSE 0 END) as delivered_orders,
-                    SUM(CASE WHEN order_status = 'R' THEN 1 ELSE 0 END) as returned_orders,
-                    SUM(final_amount) as total_order_amount
-                FROM orders
-                WHERE DATE(created_on) = :date
-                """
-                
-                # Get returns summary
-                returns_query = """
-                SELECT 
-                    COUNT(*) as total_returns,
-                    SUM(CASE WHEN return_type = 'return_refund' THEN 1 ELSE 0 END) as refund_returns,
-                    SUM(CASE WHEN return_type = 'exchange' THEN 1 ELSE 0 END) as exchange_returns,
-                    SUM(amount_pending_settlement) as pending_settlements
-                FROM returns
-                WHERE DATE(return_date) = :date
-                """
-                
-                # Get settlements summary
-                settlements_query = """
-                SELECT 
-                    COUNT(*) as total_settlements,
-                    SUM(CASE WHEN settlement_status = 'completed' THEN 1 ELSE 0 END) as completed_settlements,
-                    SUM(CASE WHEN settlement_status = 'pending' THEN 1 ELSE 0 END) as pending_settlements,
-                    SUM(total_actual_settlement) as total_settlement_amount
-                FROM settlements
-                WHERE DATE(created_at) = :date
-                """
-                
-                orders_summary = self.session.execute(text(orders_query), {"date": date}).first()
-                returns_summary = self.session.execute(text(returns_query), {"date": date}).first()
-                settlements_summary = self.session.execute(text(settlements_query), {"date": date}).first()
-                
-                return {
-                    "date": date.strftime("%Y-%m-%d"),
-                    "orders": dict(orders_summary) if orders_summary else {},
-                    "returns": dict(returns_summary) if returns_summary else {},
-                    "settlements": dict(settlements_summary) if settlements_summary else {}
-                }
-            except Exception as e:
-                logger.error(f"Error fetching daily summary: {str(e)}")
-                raise
-
-        return self.query_optimizer.get_cached_query(cache_key, fetch_summary, expire=300)
-
-    def check_data_consistency(self) -> List[Dict[str, Any]]:
-        """Perform data consistency checks."""
-        try:
-            issues = []
-
-            # Check for orphaned returns
-            orphaned_returns_query = """
-            SELECT r.order_release_id, r.order_line_id
-            FROM returns r
-            LEFT JOIN orders o ON r.order_release_id = o.order_release_id
-            WHERE o.order_release_id IS NULL
-            """
-            orphaned_returns = self.session.execute(text(orphaned_returns_query)).fetchall()
-            if orphaned_returns:
-                issues.append({
-                    "type": "orphaned_returns",
-                    "count": len(orphaned_returns),
-                    "details": [dict(row) for row in orphaned_returns]
-                })
-
-            # Check for mismatched settlement amounts
-            settlement_mismatch_query = """
-            SELECT s.order_release_id, s.order_line_id,
-                   s.total_expected_settlement, s.total_actual_settlement,
-                   s.amount_pending_settlement
-            FROM settlements s
-            WHERE s.total_expected_settlement != 
-                  (s.total_actual_settlement + s.amount_pending_settlement)
-            """
-            settlement_mismatches = self.session.execute(text(settlement_mismatch_query)).fetchall()
-            if settlement_mismatches:
-                issues.append({
-                    "type": "settlement_mismatch",
-                    "count": len(settlement_mismatches),
-                    "details": [dict(row) for row in settlement_mismatches]
-                })
-
-            # Check for invalid return dates
-            invalid_return_dates_query = """
-            SELECT r.order_release_id, r.order_line_id,
-                   r.return_date, o.created_on
-            FROM returns r
-            JOIN orders o ON r.order_release_id = o.order_release_id
-            WHERE r.return_date < o.created_on
-            """
-            invalid_return_dates = self.session.execute(text(invalid_return_dates_query)).fetchall()
-            if invalid_return_dates:
-                issues.append({
-                    "type": "invalid_return_dates",
-                    "count": len(invalid_return_dates),
-                    "details": [dict(row) for row in invalid_return_dates]
-                })
-
-            return issues
-        except Exception as e:
-            logger.error(f"Error checking data consistency: {str(e)}")
-            raise
-
-    def get_reconciliation_status(self, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
-        """Get reconciliation status for a date range."""
-        cache_key = f"reconciliation_status:{start_date.strftime('%Y-%m-%d')}:{end_date.strftime('%Y-%m-%d')}"
-
-        def fetch_status():
-            try:
-                # Get orders and returns summary
-                summary_query = """
-                SELECT 
-                    COUNT(DISTINCT o.order_release_id) as total_orders,
-                    COUNT(DISTINCT r.order_release_id) as total_returns,
-                    SUM(o.final_amount) as total_order_amount,
-                    SUM(r.amount_pending_settlement) as total_pending_settlements
-                FROM orders o
-                LEFT JOIN returns r ON o.order_release_id = r.order_release_id
-                WHERE o.created_on BETWEEN :start_date AND :end_date
-                """
-                
-                # Get settlement status
-                settlement_query = """
-                SELECT 
-                    COUNT(*) as total_settlements,
-                    SUM(CASE WHEN settlement_status = 'completed' THEN 1 ELSE 0 END) as completed_settlements,
-                    SUM(CASE WHEN settlement_status = 'partial' THEN 1 ELSE 0 END) as partial_settlements,
-                    SUM(CASE WHEN settlement_status = 'pending' THEN 1 ELSE 0 END) as pending_settlements
-                FROM settlements
-                WHERE created_at BETWEEN :start_date AND :end_date
-                """
-                
-                summary = self.session.execute(text(summary_query), {
-                    "start_date": start_date,
-                    "end_date": end_date
-                }).first()
-                
-                settlements = self.session.execute(text(settlement_query), {
-                    "start_date": start_date,
-                    "end_date": end_date
-                }).first()
-                
-                return {
-                    "period": {
-                        "start": start_date.strftime("%Y-%m-%d"),
-                        "end": end_date.strftime("%Y-%m-%d")
-                    },
-                    "summary": dict(summary) if summary else {},
-                    "settlements": dict(settlements) if settlements else {}
-                }
-            except Exception as e:
-                logger.error(f"Error fetching reconciliation status: {str(e)}")
-                raise
-
-        return self.query_optimizer.get_cached_query(cache_key, fetch_status, expire=300)
-
-    def get_performance_metrics(self) -> Dict[str, Any]:
-        """Get system performance metrics."""
-        try:
-            # Get database statistics
-            db_stats_query = """
+        """Get daily summary of orders and settlements."""
+        if date is None:
+            date = datetime.now().date()
+            
+        query = text("""
             SELECT 
                 COUNT(*) as total_orders,
-                COUNT(DISTINCT order_release_id) as unique_orders,
-                COUNT(*) FILTER (WHERE order_status = 'D') as delivered_orders,
-                COUNT(*) FILTER (WHERE order_status = 'R') as returned_orders
-            FROM orders
-            """
-            
-            # Get cache statistics
-            cache_stats = {
-                "keys": len(self.cache.redis_client.keys("*")),
-                "memory_usage": self.cache.redis_client.info(section="memory")["used_memory_human"]
-            }
-            
-            # Get query performance statistics
-            query_stats = self.query_optimizer.get_query_stats(db_stats_query)
-            
-            return {
-                "database": dict(self.session.execute(text(db_stats_query)).first()),
-                "cache": cache_stats,
-                "query_performance": query_stats
-            }
-        except Exception as e:
-            logger.error(f"Error fetching performance metrics: {str(e)}")
-            raise 
+                SUM(CASE WHEN order_status = 'Completed' THEN 1 ELSE 0 END) as completed_orders,
+                SUM(CASE WHEN order_status = 'Returned' THEN 1 ELSE 0 END) as returned_orders,
+                SUM(CASE WHEN s.status = 'settled' THEN s.total_actual_settlement ELSE 0 END) as total_settled,
+                SUM(CASE WHEN s.status = 'pending' THEN s.total_expected_settlement ELSE 0 END) as pending_settlement
+            FROM orders o
+            LEFT JOIN settlements s ON o.order_release_id = s.order_release_id
+            WHERE DATE(o.created_on) = :date
+        """)
+        
+        result = self.session.execute(query, {'date': date}).first()
+        return {
+            'total_orders': result.total_orders,
+            'completed_orders': result.completed_orders,
+            'returned_orders': result.returned_orders,
+            'total_settled': result.total_settled or 0,
+            'pending_settlement': result.pending_settlement or 0
+        }
+    
+    @cache(ttl=300)
+    def check_data_consistency(self) -> List[Dict[str, Any]]:
+        """Check data consistency across tables."""
+        issues = []
+        
+        # Check for orders without settlements
+        query = text("""
+            SELECT o.order_release_id, o.order_status, o.created_on
+            FROM orders o
+            LEFT JOIN settlements s ON o.order_release_id = s.order_release_id
+            WHERE s.order_release_id IS NULL
+            AND o.order_status = 'Completed'
+            ORDER BY o.created_on DESC
+            LIMIT 100
+        """)
+        
+        results = self.session.execute(query).fetchall()
+        if results:
+            issues.append({
+                'type': 'missing_settlements',
+                'count': len(results),
+                'details': [{
+                    'order_release_id': r.order_release_id,
+                    'status': r.order_status,
+                    'created_on': r.created_on
+                } for r in results]
+            })
+        
+        # Check for settlements without orders
+        query = text("""
+            SELECT s.order_release_id, s.status, s.created_at
+            FROM settlements s
+            LEFT JOIN orders o ON s.order_release_id = o.order_release_id
+            WHERE o.order_release_id IS NULL
+            ORDER BY s.created_at DESC
+            LIMIT 100
+        """)
+        
+        results = self.session.execute(query).fetchall()
+        if results:
+            issues.append({
+                'type': 'orphaned_settlements',
+                'count': len(results),
+                'details': [{
+                    'order_release_id': r.order_release_id,
+                    'status': r.status,
+                    'created_at': r.created_at
+                } for r in results]
+            })
+        
+        return issues
+    
+    @cache(ttl=300)
+    def get_reconciliation_status(self, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
+        """Get reconciliation status for a date range."""
+        query = text("""
+            SELECT 
+                COUNT(*) as total_orders,
+                SUM(CASE WHEN s.status = 'settled' THEN 1 ELSE 0 END) as settled_count,
+                SUM(CASE WHEN s.status = 'pending' THEN 1 ELSE 0 END) as pending_count,
+                SUM(CASE WHEN s.status = 'partial' THEN 1 ELSE 0 END) as partial_count,
+                SUM(CASE WHEN s.status = 'settled' THEN s.total_actual_settlement ELSE 0 END) as total_settled,
+                SUM(CASE WHEN s.status = 'pending' THEN s.total_expected_settlement ELSE 0 END) as pending_amount
+            FROM orders o
+            LEFT JOIN settlements s ON o.order_release_id = s.order_release_id
+            WHERE o.created_on BETWEEN :start_date AND :end_date
+        """)
+        
+        result = self.session.execute(query, {
+            'start_date': start_date,
+            'end_date': end_date
+        }).first()
+        
+        return {
+            'total_orders': result.total_orders,
+            'settled_count': result.settled_count,
+            'pending_count': result.pending_count,
+            'partial_count': result.partial_count,
+            'total_settled': result.total_settled or 0,
+            'pending_amount': result.pending_amount or 0
+        }
+    
+    @cache(ttl=300)
+    def get_performance_metrics(self) -> Dict[str, Any]:
+        """Get performance metrics for the system."""
+        query = text("""
+            SELECT 
+                COUNT(*) as total_orders,
+                AVG(CASE WHEN s.status = 'settled' 
+                    THEN EXTRACT(EPOCH FROM (s.created_at - o.created_on))/86400 
+                    ELSE NULL END) as avg_settlement_days,
+                SUM(CASE WHEN s.status = 'settled' THEN 1 ELSE 0 END)::float / COUNT(*) * 100 as settlement_rate,
+                SUM(CASE WHEN r.return_date IS NOT NULL THEN 1 ELSE 0 END)::float / COUNT(*) * 100 as return_rate
+            FROM orders o
+            LEFT JOIN settlements s ON o.order_release_id = s.order_release_id
+            LEFT JOIN returns r ON o.order_release_id = r.order_release_id
+            WHERE o.created_on >= NOW() - INTERVAL '30 days'
+        """)
+        
+        result = self.session.execute(query).first()
+        
+        return {
+            'total_orders': result.total_orders,
+            'avg_settlement_days': result.avg_settlement_days or 0,
+            'settlement_rate': result.settlement_rate or 0,
+            'return_rate': result.return_rate or 0
+        } 
