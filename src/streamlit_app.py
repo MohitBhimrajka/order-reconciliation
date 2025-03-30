@@ -3113,6 +3113,891 @@ def get_data_quality_metrics():
             'history': []
         }
 
+def settlement_tab():
+    """Settlement Management Tab"""
+    st.title("Settlement Management")
+    
+    # Initialize session state for pagination and sorting
+    if 'settlement_page' not in st.session_state:
+        st.session_state.settlements_page = 1
+    if 'settlements_sort_by' not in st.session_state:
+        st.session_state.settlements_sort_by = 'settlement_date'
+    if 'settlements_sort_order' not in st.session_state:
+        st.session_state.settlements_sort_order = 'desc'
+    if 'selected_settlements' not in st.session_state:
+        st.session_state.selected_settlements = []
+    if 'auto_refresh_settlements' not in st.session_state:
+        st.session_state.auto_refresh_settlements = True
+    
+    # Add refresh controls
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("🔄 Refresh Settlements"):
+            st.session_state.settlements_page = 1
+            st.experimental_rerun()
+    with col2:
+        st.checkbox("Auto-refresh every 5 minutes", 
+                   key="auto_refresh_settlements",
+                   help="Automatically refresh the settlements data every 5 minutes")
+    
+    # Add progress bar for loading
+    with st.spinner("Loading settlement data..."):
+        progress_bar = st.progress(0)
+        
+        # Get current month
+        current_month = datetime.now().strftime('%Y-%m')
+        
+        # Get settlement analysis
+        settlement_analysis = analyze_settlements(db, current_month)
+        
+        # Update progress
+        progress_bar.progress(50)
+        
+        # Settlement Overview Section
+        st.subheader("Settlement Overview")
+        
+        # Create metrics columns
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "Total Settlements",
+                f"{settlement_analysis['total_settlements']:,}",
+                f"{settlement_analysis['completion_rate']:.1f}% Complete"
+            )
+        
+        with col2:
+            st.metric(
+                "Pending from Previous",
+                f"{settlement_analysis['pending_from_previous']:,}",
+                f"₹{settlement_analysis['total_amount_pending']:,.2f}"
+            )
+        
+        with col3:
+            st.metric(
+                "Amount Settled",
+                f"₹{settlement_analysis['total_amount_settled']:,.2f}",
+                f"{settlement_analysis['amount_completion_rate']:.1f}% Complete"
+            )
+        
+        with col4:
+            st.metric(
+                "Avg Settlement Time",
+                f"{settlement_analysis['avg_settlement_time']:.1f} days",
+                f"{settlement_analysis['partial_settlements']} Partial"
+            )
+        
+        # Settlement Status Distribution
+        st.subheader("Settlement Status Distribution")
+        status_data = {
+            'Completed': settlement_analysis['completed_settlements'],
+            'Partial': settlement_analysis['partial_settlements'],
+            'Pending': settlement_analysis['pending_settlements']
+        }
+        fig = px.pie(
+            values=list(status_data.values()),
+            names=list(status_data.keys()),
+            title="Settlement Status Distribution"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Settlement History Section
+        st.subheader("Settlement History")
+        
+        # Get settlement history
+        history_query = db.query(SettlementHistory).filter(
+            SettlementHistory.month == current_month
+        ).order_by(
+            SettlementHistory.settlement_date.desc()
+        )
+        
+        # Add filters
+        col1, col2 = st.columns(2)
+        with col1:
+            status_filter = st.multiselect(
+                "Filter by Status",
+                options=['completed', 'partial', 'pending'],
+                default=['completed', 'partial', 'pending']
+            )
+            if status_filter:
+                history_query = history_query.filter(
+                    SettlementHistory.settlement_status.in_(status_filter)
+                )
+        
+        with col2:
+            date_range = st.date_input(
+                "Date Range",
+                value=(
+                    datetime.now().replace(day=1),
+                    datetime.now()
+                )
+            )
+            if len(date_range) == 2:
+                history_query = history_query.filter(
+                    SettlementHistory.settlement_date.between(
+                        date_range[0],
+                        date_range[1]
+                    )
+                )
+        
+        # Get history data
+        history_data = history_query.all()
+        
+        # Create history DataFrame
+        history_df = pd.DataFrame([{
+            'Order ID': h.order_release_id,
+            'Date': h.settlement_date,
+            'Status': h.settlement_status.title(),
+            'Amount Settled': h.amount_settled,
+            'Amount Pending': h.amount_pending,
+            'Month': h.month
+        } for h in history_data])
+        
+        if not history_df.empty:
+            # Add status change tracking
+            history_df['Status Change'] = history_df.groupby('Order ID')['Status'].diff()
+            history_df['Amount Change'] = history_df.groupby('Order ID')['Amount Settled'].diff()
+            
+            # Format the DataFrame
+            history_df['Date'] = pd.to_datetime(history_df['Date']).dt.strftime('%Y-%m-%d %H:%M')
+            history_df['Amount Settled'] = history_df['Amount Settled'].apply(lambda x: f"₹{x:,.2f}")
+            history_df['Amount Pending'] = history_df['Amount Pending'].apply(lambda x: f"₹{x:,.2f}")
+            history_df['Amount Change'] = history_df['Amount Change'].apply(
+                lambda x: f"₹{x:+,.2f}" if pd.notna(x) else ""
+            )
+            
+            # Display the history table
+            st.dataframe(
+                history_df,
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Add settlement timeline visualization
+            st.subheader("Settlement Timeline")
+            
+            # Create timeline data
+            timeline_data = history_df.copy()
+            timeline_data['Date'] = pd.to_datetime(timeline_data['Date'])
+            
+            fig = px.scatter(
+                timeline_data,
+                x='Date',
+                y='Amount Settled',
+                color='Status',
+                hover_data=['Order ID', 'Amount Pending', 'Status Change'],
+                title="Settlement Timeline"
+            )
+            fig.update_layout(
+                yaxis_title="Amount Settled (₹)",
+                xaxis_title="Date",
+                showlegend=True
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No settlement history found for the selected filters.")
+        
+        # Update progress
+        progress_bar.progress(100)
+        
+        # Add auto-refresh functionality
+        if st.session_state.auto_refresh_settlements:
+            time.sleep(300)  # 5 minutes
+            st.experimental_rerun()
+
+def settlement_reports_tab():
+    """Settlement Reports tab implementation."""
+    st.title("Settlement Reports")
+    
+    # Initialize session state
+    if 'settlement_report_type' not in st.session_state:
+        st.session_state.settlement_report_type = 'cross_month'
+    if 'settlement_report_month' not in st.session_state:
+        st.session_state.settlement_report_month = datetime.now().strftime('%Y-%m')
+    
+    # Report Type Selection
+    report_type = st.radio(
+        "Select Report Type",
+        options=['cross_month', 'pending', 'history'],
+        format_func=lambda x: x.replace('_', ' ').title(),
+        key='settlement_report_type'
+    )
+    
+    # Date Selection
+    col1, col2 = st.columns(2)
+    with col1:
+        year = st.selectbox(
+            "Select Year",
+            range(2020, datetime.now().year + 1),
+            index=datetime.now().year - 2020
+        )
+    with col2:
+        month = st.selectbox(
+            "Select Month",
+            range(1, 13),
+            format_func=lambda x: datetime(2000, x, 1).strftime('%B')
+        )
+    
+    selected_month = f"{year}-{month:02d}"
+    
+    # Export Options
+    export_col1, export_col2 = st.columns(2)
+    with export_col1:
+        if st.button("Export CSV"):
+            if report_type == 'cross_month':
+                data = export_cross_month_report(selected_month)
+            elif report_type == 'pending':
+                data = export_pending_settlements_report(selected_month)
+            else:
+                data = export_settlement_history_report(selected_month)
+            
+            if data:
+                st.download_button(
+                    "Download CSV",
+                    data,
+                    f"settlement_report_{report_type}_{selected_month}.csv",
+                    "text/csv"
+                )
+    
+    with export_col2:
+        if st.button("Export PDF"):
+            if report_type == 'cross_month':
+                data = generate_cross_month_pdf(selected_month)
+            elif report_type == 'pending':
+                data = generate_pending_pdf(selected_month)
+            else:
+                data = generate_history_pdf(selected_month)
+            
+            if data:
+                b64 = base64.b64encode(data).decode()
+                href = f'<a href="data:application/pdf;base64,{b64}" download="settlement_report_{report_type}_{selected_month}.pdf">Click here to download the PDF report</a>'
+                st.markdown(href, unsafe_allow_html=True)
+    
+    # Report Content
+    if report_type == 'cross_month':
+        show_cross_month_report(selected_month)
+    elif report_type == 'pending':
+        show_pending_settlements_report(selected_month)
+    else:
+        show_settlement_history_report(selected_month)
+
+def show_cross_month_report(month: str):
+    """Display cross-month settlement analysis report."""
+    try:
+        # Get current month analysis
+        current_analysis = analyze_settlements(db, month)
+        
+        # Get previous month analysis
+        prev_month = (datetime.strptime(month, '%Y-%m') - pd.DateOffset(months=1)).strftime('%Y-%m')
+        prev_analysis = analyze_settlements(db, prev_month)
+        
+        # Cross-month metrics
+        st.subheader("Cross-Month Settlement Analysis")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric(
+                "Pending from Previous Month",
+                f"{prev_analysis['pending_settlements']:,}",
+                f"₹{prev_analysis['total_amount_pending']:,.2f}"
+            )
+        
+        with col2:
+            completed_from_prev = prev_analysis['pending_settlements'] - current_analysis['pending_from_previous']
+            st.metric(
+                "Completed from Previous",
+                f"{completed_from_prev:,}",
+                f"{completed_from_prev/prev_analysis['pending_settlements']*100:.1f}% Completion"
+            )
+        
+        with col3:
+            st.metric(
+                "Carried Forward",
+                f"{current_analysis['pending_from_previous']:,}",
+                f"₹{current_analysis['total_amount_pending']:,.2f}"
+            )
+        
+        # Settlement Trends
+        st.subheader("Settlement Trends")
+        trends_data = current_analysis['trends']
+        
+        if trends_data:
+            df = pd.DataFrame([{
+                'Month': t.month,
+                'Total': t.total_settlements,
+                'Completed': t.completed_settlements,
+                'Partial': t.partial_settlements,
+                'Pending': t.pending_settlements,
+                'Amount Settled': t.total_settled,
+                'Amount Pending': t.total_pending
+            } for t in trends_data])
+            
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=df['Month'],
+                y=df['Completed'],
+                name='Completed',
+                marker_color='green'
+            ))
+            fig.add_trace(go.Bar(
+                x=df['Month'],
+                y=df['Partial'],
+                name='Partial',
+                marker_color='orange'
+            ))
+            fig.add_trace(go.Bar(
+                x=df['Month'],
+                y=df['Pending'],
+                name='Pending',
+                marker_color='red'
+            ))
+            
+            fig.update_layout(
+                title="Settlement Status Distribution Over Time",
+                barmode='stack',
+                xaxis_title="Month",
+                yaxis_title="Number of Settlements"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Amount trends
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=df['Month'],
+                y=df['Amount Settled'],
+                name='Amount Settled',
+                line=dict(color='green')
+            ))
+            fig.add_trace(go.Scatter(
+                x=df['Month'],
+                y=df['Amount Pending'],
+                name='Amount Pending',
+                line=dict(color='red')
+            ))
+            
+            fig.update_layout(
+                title="Settlement Amount Trends",
+                xaxis_title="Month",
+                yaxis_title="Amount (₹)"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+    except Exception as e:
+        st.error(f"Error generating cross-month report: {str(e)}")
+
+def show_pending_settlements_report(month: str):
+    """Display pending settlements report."""
+    try:
+        # Get pending settlements
+        pending_settlements = Settlement.get_pending_settlements(db, month)
+        
+        st.subheader("Pending Settlements Summary")
+        
+        # Summary metrics
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric(
+                "Total Pending",
+                f"{len(pending_settlements):,}",
+                f"₹{sum(s.amount_pending for s in pending_settlements):,.2f}"
+            )
+        
+        with col2:
+            avg_pending = sum(s.amount_pending for s in pending_settlements) / len(pending_settlements) if pending_settlements else 0
+            st.metric(
+                "Average Pending Amount",
+                f"₹{avg_pending:,.2f}",
+                f"{len([s for s in pending_settlements if s.amount_pending > avg_pending])} Above Average"
+            )
+        
+        with col3:
+            days_pending = sum(
+                (datetime.now().date() - s.settlement_date).days 
+                for s in pending_settlements
+            ) / len(pending_settlements) if pending_settlements else 0
+            st.metric(
+                "Average Days Pending",
+                f"{days_pending:.1f} days",
+                f"{len([s for s in pending_settlements if (datetime.now().date() - s.settlement_date).days > days_pending])} Above Average"
+            )
+        
+        # Pending settlements table
+        st.subheader("Pending Settlements Details")
+        
+        if pending_settlements:
+            df = pd.DataFrame([{
+                'Order ID': s.order_release_id,
+                'Date': s.settlement_date.strftime('%Y-%m-%d'),
+                'Expected Amount': s.order.final_amount,
+                'Amount Settled': s.amount_settled,
+                'Amount Pending': s.amount_pending,
+                'Days Pending': (datetime.now().date() - s.settlement_date).days,
+                'Status': s.settlement_status
+            } for s in pending_settlements])
+            
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Distribution of pending amounts
+            fig = px.histogram(
+                df,
+                x='Amount Pending',
+                title="Distribution of Pending Amounts",
+                labels={'Amount Pending': 'Amount (₹)'}
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No pending settlements found for the selected month.")
+        
+    except Exception as e:
+        st.error(f"Error generating pending settlements report: {str(e)}")
+
+def show_settlement_history_report(month: str):
+    """Display settlement history report."""
+    try:
+        # Get settlement history
+        history = SettlementHistory.get_settlement_trends(db, month, month)
+        
+        st.subheader("Settlement History")
+        
+        if history:
+            # Summary metrics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric(
+                    "Total History Records",
+                    f"{len(history):,}",
+                    f"₹{sum(h.total_settled for h in history):,.2f} Total Settled"
+                )
+            
+            with col2:
+                st.metric(
+                    "Status Changes",
+                    f"{sum(1 for h in history if h.total_settlements > 0):,}",
+                    f"{sum(h.completed_settlements for h in history):,} Completed"
+                )
+            
+            with col3:
+                st.metric(
+                    "Average Settlement Time",
+                    f"{sum((datetime.now().date() - h.settlement_date).days for h in history) / len(history):.1f} days",
+                    f"{sum(h.partial_settlements for h in history):,} Partial"
+                )
+            
+            # History timeline
+            st.subheader("Settlement Timeline")
+            
+            df = pd.DataFrame([{
+                'Date': h.settlement_date.strftime('%Y-%m-%d'),
+                'Total': h.total_settlements,
+                'Completed': h.completed_settlements,
+                'Partial': h.partial_settlements,
+                'Pending': h.pending_settlements,
+                'Amount Settled': h.total_settled,
+                'Amount Pending': h.total_pending
+            } for h in history])
+            
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=df['Date'],
+                y=df['Amount Settled'],
+                name='Amount Settled',
+                line=dict(color='green')
+            ))
+            fig.add_trace(go.Scatter(
+                x=df['Date'],
+                y=df['Amount Pending'],
+                name='Amount Pending',
+                line=dict(color='red')
+            ))
+            
+            fig.update_layout(
+                title="Daily Settlement Amounts",
+                xaxis_title="Date",
+                yaxis_title="Amount (₹)"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Status changes
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=df['Date'],
+                y=df['Completed'],
+                name='Completed',
+                line=dict(color='green')
+            ))
+            fig.add_trace(go.Scatter(
+                x=df['Date'],
+                y=df['Partial'],
+                name='Partial',
+                line=dict(color='orange')
+            ))
+            fig.add_trace(go.Scatter(
+                x=df['Date'],
+                y=df['Pending'],
+                name='Pending',
+                line=dict(color='red')
+            ))
+            
+            fig.update_layout(
+                title="Daily Settlement Status Changes",
+                xaxis_title="Date",
+                yaxis_title="Number of Settlements"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+        else:
+            st.info("No settlement history found for the selected month.")
+        
+    except Exception as e:
+        st.error(f"Error generating settlement history report: {str(e)}")
+
+def export_cross_month_report(month: str) -> Optional[str]:
+    """Export cross-month settlement analysis to CSV."""
+    try:
+        # Get analysis data
+        current_analysis = analyze_settlements(db, month)
+        prev_month = (datetime.strptime(month, '%Y-%m') - pd.DateOffset(months=1)).strftime('%Y-%m')
+        prev_analysis = analyze_settlements(db, prev_month)
+        
+        # Create DataFrame
+        data = {
+            'Metric': [
+                'Current Month Total Settlements',
+                'Current Month Completed',
+                'Current Month Partial',
+                'Current Month Pending',
+                'Current Month Amount Settled',
+                'Current Month Amount Pending',
+                'Previous Month Pending',
+                'Completed from Previous',
+                'Carried Forward',
+                'Average Settlement Time'
+            ],
+            'Value': [
+                current_analysis['total_settlements'],
+                current_analysis['completed_settlements'],
+                current_analysis['partial_settlements'],
+                current_analysis['pending_settlements'],
+                current_analysis['total_amount_settled'],
+                current_analysis['total_amount_pending'],
+                prev_analysis['pending_settlements'],
+                prev_analysis['pending_settlements'] - current_analysis['pending_from_previous'],
+                current_analysis['pending_from_previous'],
+                current_analysis['avg_settlement_time']
+            ]
+        }
+        
+        df = pd.DataFrame(data)
+        return df.to_csv(index=False)
+        
+    except Exception as e:
+        logger.error(f"Error exporting cross-month report: {str(e)}")
+        return None
+
+def export_pending_settlements_report(month: str) -> Optional[str]:
+    """Export pending settlements report to CSV."""
+    try:
+        # Get pending settlements
+        pending_settlements = Settlement.get_pending_settlements(db, month)
+        
+        # Create DataFrame
+        data = []
+        for s in pending_settlements:
+            data.append({
+                'Order ID': s.order_release_id,
+                'Date': s.settlement_date.strftime('%Y-%m-%d'),
+                'Expected Amount': s.order.final_amount,
+                'Amount Settled': s.amount_settled,
+                'Amount Pending': s.amount_pending,
+                'Days Pending': (datetime.now().date() - s.settlement_date).days,
+                'Status': s.settlement_status
+            })
+        
+        df = pd.DataFrame(data)
+        return df.to_csv(index=False)
+        
+    except Exception as e:
+        logger.error(f"Error exporting pending settlements report: {str(e)}")
+        return None
+
+def export_settlement_history_report(month: str) -> Optional[str]:
+    """Export settlement history report to CSV."""
+    try:
+        # Get settlement history
+        history = SettlementHistory.get_settlement_trends(db, month, month)
+        
+        # Create DataFrame
+        data = []
+        for h in history:
+            data.append({
+                'Date': h.settlement_date.strftime('%Y-%m-%d'),
+                'Total Settlements': h.total_settlements,
+                'Completed': h.completed_settlements,
+                'Partial': h.partial_settlements,
+                'Pending': h.pending_settlements,
+                'Amount Settled': h.total_settled,
+                'Amount Pending': h.total_pending
+            })
+        
+        df = pd.DataFrame(data)
+        return df.to_csv(index=False)
+        
+    except Exception as e:
+        logger.error(f"Error exporting settlement history report: {str(e)}")
+        return None
+
+def generate_cross_month_pdf(month: str) -> Optional[bytes]:
+    """Generate PDF report for cross-month analysis."""
+    try:
+        # Get analysis data
+        current_analysis = analyze_settlements(db, month)
+        prev_month = (datetime.strptime(month, '%Y-%m') - pd.DateOffset(months=1)).strftime('%Y-%m')
+        prev_analysis = analyze_settlements(db, prev_month)
+        
+        # Create PDF
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer)
+        elements = []
+        
+        # Title
+        elements.append(Paragraph(f"Cross-Month Settlement Analysis Report - {month}", styles['Heading1']))
+        elements.append(Spacer(1, 20))
+        
+        # Summary
+        elements.append(Paragraph("Summary", styles['Heading2']))
+        elements.append(Spacer(1, 10))
+        
+        summary_data = [
+            ["Metric", "Value"],
+            ["Current Month Total Settlements", str(current_analysis['total_settlements'])],
+            ["Current Month Completed", str(current_analysis['completed_settlements'])],
+            ["Current Month Partial", str(current_analysis['partial_settlements'])],
+            ["Current Month Pending", str(current_analysis['pending_settlements'])],
+            ["Current Month Amount Settled", f"₹{current_analysis['total_amount_settled']:,.2f}"],
+            ["Current Month Amount Pending", f"₹{current_analysis['total_amount_pending']:,.2f}"],
+            ["Previous Month Pending", str(prev_analysis['pending_settlements'])],
+            ["Completed from Previous", str(prev_analysis['pending_settlements'] - current_analysis['pending_from_previous'])],
+            ["Carried Forward", str(current_analysis['pending_from_previous'])],
+            ["Average Settlement Time", f"{current_analysis['avg_settlement_time']:.1f} days"]
+        ]
+        
+        summary_table = Table(summary_data, colWidths=[3*inch, 2*inch])
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 14),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 12),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+        ]))
+        elements.append(summary_table)
+        
+        # Build PDF
+        doc.build(elements)
+        return buffer.getvalue()
+        
+    except Exception as e:
+        logger.error(f"Error generating cross-month PDF: {str(e)}")
+        return None
+
+def generate_pending_pdf(month: str) -> Optional[bytes]:
+    """Generate PDF report for pending settlements."""
+    try:
+        # Get pending settlements
+        pending_settlements = Settlement.get_pending_settlements(db, month)
+        
+        # Create PDF
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer)
+        elements = []
+        
+        # Title
+        elements.append(Paragraph(f"Pending Settlements Report - {month}", styles['Heading1']))
+        elements.append(Spacer(1, 20))
+        
+        # Summary
+        elements.append(Paragraph("Summary", styles['Heading2']))
+        elements.append(Spacer(1, 10))
+        
+        total_pending = sum(s.amount_pending for s in pending_settlements)
+        avg_pending = total_pending / len(pending_settlements) if pending_settlements else 0
+        avg_days = sum(
+            (datetime.now().date() - s.settlement_date).days 
+            for s in pending_settlements
+        ) / len(pending_settlements) if pending_settlements else 0
+        
+        summary_data = [
+            ["Metric", "Value"],
+            ["Total Pending Settlements", str(len(pending_settlements))],
+            ["Total Pending Amount", f"₹{total_pending:,.2f}"],
+            ["Average Pending Amount", f"₹{avg_pending:,.2f}"],
+            ["Average Days Pending", f"{avg_days:.1f} days"]
+        ]
+        
+        summary_table = Table(summary_data, colWidths=[3*inch, 2*inch])
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 14),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 12),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+        ]))
+        elements.append(summary_table)
+        
+        # Details
+        if pending_settlements:
+            elements.append(Paragraph("Pending Settlements Details", styles['Heading2']))
+            elements.append(Spacer(1, 10))
+            
+            details_data = [["Order ID", "Date", "Expected", "Settled", "Pending", "Days"]]
+            for s in pending_settlements:
+                details_data.append([
+                    s.order_release_id,
+                    s.settlement_date.strftime('%Y-%m-%d'),
+                    f"₹{s.order.final_amount:,.2f}",
+                    f"₹{s.amount_settled:,.2f}",
+                    f"₹{s.amount_pending:,.2f}",
+                    str((datetime.now().date() - s.settlement_date).days)
+                ])
+            
+            details_table = Table(details_data, colWidths=[1.5*inch, 1*inch, 1.5*inch, 1.5*inch, 1.5*inch, 1*inch])
+            details_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 12),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
+                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 1), (-1, -1), 10),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            elements.append(details_table)
+        
+        # Build PDF
+        doc.build(elements)
+        return buffer.getvalue()
+        
+    except Exception as e:
+        logger.error(f"Error generating pending PDF: {str(e)}")
+        return None
+
+def generate_history_pdf(month: str) -> Optional[bytes]:
+    """Generate PDF report for settlement history."""
+    try:
+        # Get settlement history
+        history = SettlementHistory.get_settlement_trends(db, month, month)
+        
+        # Create PDF
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer)
+        elements = []
+        
+        # Title
+        elements.append(Paragraph(f"Settlement History Report - {month}", styles['Heading1']))
+        elements.append(Spacer(1, 20))
+        
+        # Summary
+        elements.append(Paragraph("Summary", styles['Heading2']))
+        elements.append(Spacer(1, 10))
+        
+        total_records = len(history)
+        total_settled = sum(h.total_settled for h in history)
+        total_completed = sum(h.completed_settlements for h in history)
+        total_partial = sum(h.partial_settlements for h in history)
+        avg_days = sum(
+            (datetime.now().date() - h.settlement_date).days 
+            for h in history
+        ) / len(history) if history else 0
+        
+        summary_data = [
+            ["Metric", "Value"],
+            ["Total History Records", str(total_records)],
+            ["Total Amount Settled", f"₹{total_settled:,.2f}"],
+            ["Total Completed", str(total_completed)],
+            ["Total Partial", str(total_partial)],
+            ["Average Settlement Time", f"{avg_days:.1f} days"]
+        ]
+        
+        summary_table = Table(summary_data, colWidths=[3*inch, 2*inch])
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 14),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 12),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+        ]))
+        elements.append(summary_table)
+        
+        # Details
+        if history:
+            elements.append(Paragraph("Daily Settlement Details", styles['Heading2']))
+            elements.append(Spacer(1, 10))
+            
+            details_data = [["Date", "Total", "Completed", "Partial", "Pending", "Amount Settled", "Amount Pending"]]
+            for h in history:
+                details_data.append([
+                    h.settlement_date.strftime('%Y-%m-%d'),
+                    str(h.total_settlements),
+                    str(h.completed_settlements),
+                    str(h.partial_settlements),
+                    str(h.pending_settlements),
+                    f"₹{h.total_settled:,.2f}",
+                    f"₹{h.total_pending:,.2f}"
+                ])
+            
+            details_table = Table(details_data, colWidths=[1*inch, 1*inch, 1*inch, 1*inch, 1*inch, 1.5*inch, 1.5*inch])
+            details_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 12),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
+                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 1), (-1, -1), 10),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            elements.append(details_table)
+        
+        # Build PDF
+        doc.build(elements)
+        return buffer.getvalue()
+        
+    except Exception as e:
+        logger.error(f"Error generating history PDF: {str(e)}")
+        return None
+
 def main():
     """Main application entry point."""
     st.set_page_config(
@@ -3121,22 +4006,24 @@ def main():
         layout="wide"
     )
     
-    # Sidebar
+    # Sidebar navigation
     st.sidebar.title("Navigation")
     tab = st.sidebar.radio(
         "Select Tab",
-        ["Dashboard", "Reconciliation Reports", "Orders Management", "Returns Analysis", "Data Quality"]
+        options=["Dashboard", "Orders", "Returns", "Settlements", "Settlement Reports", "Data Quality"]
     )
     
     # Main content
     if tab == "Dashboard":
         dashboard_tab()
-    elif tab == "Reconciliation Reports":
-        reconciliation_reports_tab()
-    elif tab == "Orders Management":
+    elif tab == "Orders":
         orders_management_tab()
-    elif tab == "Returns Analysis":
+    elif tab == "Returns":
         returns_analysis_tab()
+    elif tab == "Settlements":
+        settlement_tab()
+    elif tab == "Settlement Reports":
+        settlement_reports_tab()
     elif tab == "Data Quality":
         data_quality_tab()
 

@@ -1,7 +1,7 @@
 import pandas as pd
 from datetime import datetime
 from sqlalchemy.orm import Session
-from .models import Order, Return, Settlement, SettlementDate, MonthlyReconciliation
+from .models import Order, Return, Settlement, SettlementDate, MonthlyReconciliation, SettlementHistory
 from typing import List, Dict, Any
 import logging
 
@@ -70,29 +70,102 @@ def process_returns(df: pd.DataFrame, db: Session) -> List[Return]:
             logger.error(f"Error processing return for order {row['order_release_id']}: {str(e)}")
     return returns
 
-def process_settlements(df: pd.DataFrame, db: Session) -> List[Settlement]:
-    """Process settlements data and create Settlement records."""
-    settlements = []
-    for _, row in df.iterrows():
-        try:
-            settlement = Settlement(
-                order_release_id=str(row['order_release_id']),
-                order_line_id=str(row['order_line_id']),
-                total_expected_settlement=float(row['total_expected_settlement']),
-                total_actual_settlement=float(row['total_actual_settlement']),
-                amount_pending_settlement=float(row['amount_pending_settlement']),
-                prepaid_commission_deduction=float(row['prepaid_commission_deduction']),
-                prepaid_logistics_deduction=float(row['prepaid_logistics_deduction']),
-                prepaid_payment=float(row['prepaid_payment']),
-                postpaid_commission_deduction=float(row['postpaid_commission_deduction']),
-                postpaid_logistics_deduction=float(row['postpaid_logistics_deduction']),
-                postpaid_payment=float(row['postpaid_payment']),
-                settlement_status='completed' if float(row['amount_pending_settlement']) == 0 else 'partial' if float(row['amount_pending_settlement']) < float(row['total_expected_settlement']) else 'pending'
-            )
-            settlements.append(settlement)
-        except Exception as e:
-            logger.error(f"Error processing settlement for order {row['order_release_id']}: {str(e)}")
-    return settlements
+def process_settlements(session: Session, settlements_data: List[Dict]) -> None:
+    """Process settlement data and create/update settlement records with history tracking."""
+    try:
+        for settlement_data in settlements_data:
+            # Get or create settlement record
+            settlement = session.query(Settlement).filter(
+                Settlement.order_release_id == settlement_data['order_release_id']
+            ).first()
+            
+            # Get the order to check its month and amount
+            order = session.query(Order).filter(
+                Order.order_release_id == settlement_data['order_release_id']
+            ).first()
+            
+            if not order:
+                logger.warning(f"Order not found for settlement: {settlement_data['order_release_id']}")
+                continue
+            
+            # Calculate settlement status based on amounts
+            amount_settled = float(settlement_data['amount_settled'])
+            amount_pending = float(settlement_data['amount_pending'])
+            total_amount = float(order.final_amount)
+            
+            # Determine settlement status
+            if amount_pending == 0:
+                status = 'completed'
+            elif amount_settled > 0:
+                status = 'partial'
+            else:
+                status = 'pending'
+            
+            if not settlement:
+                # Create new settlement
+                settlement = Settlement(
+                    order_release_id=settlement_data['order_release_id'],
+                    settlement_date=settlement_data['settlement_date'],
+                    settlement_status=status,
+                    amount_settled=amount_settled,
+                    amount_pending=amount_pending,
+                    month=settlement_data['month']
+                )
+                session.add(settlement)
+                
+                # Create initial history record
+                history = SettlementHistory(
+                    order_release_id=settlement_data['order_release_id'],
+                    settlement_date=settlement_data['settlement_date'],
+                    settlement_status=status,
+                    amount_settled=amount_settled,
+                    amount_pending=amount_pending,
+                    month=settlement_data['month']
+                )
+                session.add(history)
+            else:
+                # Check if this is a status change
+                status_changed = settlement.settlement_status != status
+                amount_changed = settlement.amount_settled != amount_settled
+                
+                if status_changed or amount_changed:
+                    # Update settlement
+                    settlement.update_settlement(
+                        amount_settled=amount_settled,
+                        status=status
+                    )
+                    
+                    # Create history record for the change
+                    history = SettlementHistory(
+                        order_release_id=settlement_data['order_release_id'],
+                        settlement_date=settlement_data['settlement_date'],
+                        settlement_status=status,
+                        amount_settled=amount_settled,
+                        amount_pending=amount_pending,
+                        month=settlement_data['month']
+                    )
+                    session.add(history)
+            
+            # Handle cross-month settlement tracking
+            if status == 'pending' and order.month != settlement_data['month']:
+                # This is a pending settlement from a previous month
+                # Create a history record to track it
+                history = SettlementHistory(
+                    order_release_id=settlement_data['order_release_id'],
+                    settlement_date=settlement_data['settlement_date'],
+                    settlement_status='pending',
+                    amount_settled=amount_settled,
+                    amount_pending=amount_pending,
+                    month=order.month  # Use the original order month
+                )
+                session.add(history)
+        
+        session.commit()
+        
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Error processing settlements: {str(e)}")
+        raise Exception(f"Error processing settlements: {str(e)}")
 
 def process_settlement_dates(df: pd.DataFrame, db: Session) -> List[SettlementDate]:
     """Process settlement dates from settlement data."""
@@ -176,9 +249,7 @@ def process_files(orders_file: str, returns_file: str, settlements_file: str, db
         db.commit()
 
         # Process and add settlements
-        settlements = process_settlements(settlements_df, db)
-        db.add_all(settlements)
-        db.commit()
+        settlements = process_settlements(db, settlements_df.to_dict(orient='records'))
 
         # Process and add settlement dates
         settlement_dates = process_settlement_dates(settlements_df, db)
@@ -195,4 +266,70 @@ def process_files(orders_file: str, returns_file: str, settlements_file: str, db
     except Exception as e:
         logger.error(f"Error processing files: {str(e)}")
         db.rollback()
-        raise 
+        raise
+
+def analyze_settlements(session: Session, month: str) -> Dict[str, Any]:
+    """Analyze settlements for a specific month."""
+    try:
+        # Get all settlements for the month
+        settlements = session.query(Settlement).filter(
+            Settlement.month == month
+        ).all()
+        
+        # Get pending settlements from previous months
+        previous_month = (datetime.strptime(month, '%Y-%m') - pd.DateOffset(months=1)).strftime('%Y-%m')
+        pending_from_previous = session.query(Settlement).filter(
+            Settlement.settlement_status == 'pending',
+            Settlement.month == previous_month
+        ).all()
+        
+        # Calculate metrics
+        total_settlements = len(settlements)
+        completed_settlements = sum(1 for s in settlements if s.settlement_status == 'completed')
+        partial_settlements = sum(1 for s in settlements if s.settlement_status == 'partial')
+        pending_settlements = sum(1 for s in settlements if s.settlement_status == 'pending')
+        
+        total_amount_settled = sum(s.amount_settled for s in settlements)
+        total_amount_pending = sum(s.amount_pending for s in settlements)
+        
+        # Calculate completion rates
+        completion_rate = (completed_settlements / total_settlements * 100) if total_settlements > 0 else 0
+        amount_completion_rate = (total_amount_settled / (total_amount_settled + total_amount_pending) * 100) if (total_amount_settled + total_amount_pending) > 0 else 0
+        
+        # Calculate average settlement time
+        completed_settlements_with_dates = [
+            s for s in settlements 
+            if s.settlement_status == 'completed' and s.settlement_date
+        ]
+        if completed_settlements_with_dates:
+            avg_settlement_time = sum(
+                (s.settlement_date - s.order.created_on.date()).days 
+                for s in completed_settlements_with_dates
+            ) / len(completed_settlements_with_dates)
+        else:
+            avg_settlement_time = 0
+        
+        # Get settlement trends
+        trends = SettlementHistory.get_settlement_trends(
+            session,
+            start_month=previous_month,
+            end_month=month
+        )
+        
+        return {
+            'total_settlements': total_settlements,
+            'completed_settlements': completed_settlements,
+            'partial_settlements': partial_settlements,
+            'pending_settlements': pending_settlements,
+            'total_amount_settled': total_amount_settled,
+            'total_amount_pending': total_amount_pending,
+            'completion_rate': completion_rate,
+            'amount_completion_rate': amount_completion_rate,
+            'avg_settlement_time': avg_settlement_time,
+            'pending_from_previous': len(pending_from_previous),
+            'trends': trends
+        }
+        
+    except Exception as e:
+        logger.error(f"Error analyzing settlements for {month}: {str(e)}")
+        raise Exception(f"Error analyzing settlements: {str(e)}") 
